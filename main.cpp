@@ -13,7 +13,7 @@ using namespace std;
 
 enum OrderType { BUY, SELL };
 
-// Order structure
+//Order structure
 struct Order {
     OrderType type;
     int quantity;
