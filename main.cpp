@@ -29,12 +29,16 @@ struct OrderList {
     OrderList() : head(nullptr) {}
 
     void addOrder(OrderType type, int quantity, float price) {
-        Order* newOrder = new Order(type, quantity, price);
-        newOrder->next.store(head.load(memory_order_relaxed), memory_order_relaxed);
+    Order* newOrder = new Order(type, quantity, price);
+    Order* expectedHead;
 
-        while (!head.compare_exchange_weak(
-            newOrder->next, newOrder, memory_order_release, memory_order_relaxed)) {}
-    }
+    do {
+        expectedHead = head.load(memory_order_relaxed);
+        newOrder->next.store(expectedHead, memory_order_relaxed);
+    } while (!head.compare_exchange_weak(
+        expectedHead, newOrder, memory_order_release, memory_order_relaxed));
+}
+
 
     vector<Order*> toVector() {
         vector<Order*> orders;
