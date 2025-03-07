@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdlib>
 #include <ctime>
+#include <mutex>
 
 using namespace std;
 
@@ -25,20 +26,21 @@ struct Order {
 // Lock-free singly linked list for orders
 struct OrderList {
     atomic<Order*> head;
+    mutex mtx;  // Mutex to ensure thread safety on critical sections
 
     OrderList() : head(nullptr) {}
 
     void addOrder(OrderType type, int quantity, float price) {
-    Order* newOrder = new Order(type, quantity, price);
+        lock_guard<mutex> lock(mtx);  // Lock to prevent race conditions
 
-    Order* expectedHead = head.load(memory_order_relaxed);
-    do {
-        newOrder->next.store(expectedHead, memory_order_relaxed);
-    } while (!head.compare_exchange_weak(
-        expectedHead, newOrder, memory_order_release, memory_order_relaxed));
-}
+        Order* newOrder = new Order(type, quantity, price);
+        Order* expectedHead = head.load(memory_order_acquire);
 
-
+        do {
+            newOrder->next.store(expectedHead, memory_order_relaxed);  // Set the 'next' pointer of the new order to the current head
+        } while (!head.compare_exchange_weak(
+            expectedHead, newOrder, memory_order_release, memory_order_relaxed));  // Attempt to set the new order as the head
+    }
 
     vector<Order*> toVector() {
         vector<Order*> orders;
@@ -51,6 +53,8 @@ struct OrderList {
     }
 
     void removeOrder(Order* target) {
+        lock_guard<mutex> lock(mtx);  // Lock to prevent race conditions
+
         Order* prev = nullptr;
         Order* current = head.load(memory_order_acquire);
 
@@ -60,9 +64,11 @@ struct OrderList {
                 if (prev) {
                     prev->next.store(nextOrder, memory_order_release);
                 } else {
-                    head.compare_exchange_strong(current, nextOrder, memory_order_release, memory_order_relaxed);
+                    // Ensure that the head is only updated when no other thread is modifying it.
+                    if (head.compare_exchange_strong(current, nextOrder, memory_order_release, memory_order_relaxed)) {
+                        delete current;
+                    }
                 }
-                delete current;
                 return;
             }
             prev = current;
@@ -94,6 +100,7 @@ void addOrder(OrderType type, int tickerID, int quantity, float price) {
 void matchOrders(int tickerID) {
     if (tickerID < 0 || tickerID >= MAX_TICKERS) return;
 
+    // Copy the orders into vectors to avoid modification while iterating.
     auto buyOrders = tickers[tickerID].buyOrders.toVector();
     auto sellOrders = tickers[tickerID].sellOrders.toVector();
 
