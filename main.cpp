@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <mutex>
+#include <memory>
+#include <queue>
 
 using namespace std;
 
@@ -13,7 +15,7 @@ using namespace std;
 
 enum OrderType { BUY, SELL };
 
-//Order structure
+// Order structure
 struct Order {
     OrderType type;
     int quantity;
@@ -26,35 +28,19 @@ struct Order {
 // Lock-free singly linked list for orders
 struct OrderList {
     atomic<Order*> head;
-    mutex mtx;  // Mutex to ensure thread safety on critical sections
 
     OrderList() : head(nullptr) {}
 
     void addOrder(OrderType type, int quantity, float price) {
-        lock_guard<mutex> lock(mtx);  // Lock to prevent race conditions
-
         Order* newOrder = new Order(type, quantity, price);
         Order* expectedHead = head.load(memory_order_acquire);
 
         do {
-            newOrder->next.store(expectedHead, memory_order_relaxed);  // Set the 'next' pointer of the new order to the current head
-        } while (!head.compare_exchange_weak(
-            expectedHead, newOrder, memory_order_release, memory_order_relaxed));  // Attempt to set the new order as the head
-    }
-
-    vector<Order*> toVector() {
-        vector<Order*> orders;
-        Order* current = head.load(memory_order_acquire);
-        while (current) {
-            orders.push_back(current);
-            current = current->next.load(memory_order_acquire);
-        }
-        return orders;
+            newOrder->next.store(expectedHead, memory_order_relaxed);
+        } while (!head.compare_exchange_weak(expectedHead, newOrder, memory_order_release, memory_order_relaxed));
     }
 
     void removeOrder(Order* target) {
-        lock_guard<mutex> lock(mtx);  // Lock to prevent race conditions
-
         Order* prev = nullptr;
         Order* current = head.load(memory_order_acquire);
 
@@ -64,16 +50,25 @@ struct OrderList {
                 if (prev) {
                     prev->next.store(nextOrder, memory_order_release);
                 } else {
-                    // Ensure that the head is only updated when no other thread is modifying it.
-                    if (head.compare_exchange_strong(current, nextOrder, memory_order_release, memory_order_relaxed)) {
-                        delete current;
-                    }
+                    head.compare_exchange_strong(current, nextOrder, memory_order_release, memory_order_relaxed);
                 }
+                delete current;
                 return;
             }
             prev = current;
             current = current->next.load(memory_order_acquire);
         }
+    }
+
+    // Convert linked list to vector (for easier processing in matching)
+    vector<Order*> toVector() {
+        vector<Order*> orders;
+        Order* current = head.load(memory_order_acquire);
+        while (current) {
+            orders.push_back(current);
+            current = current->next.load(memory_order_acquire);
+        }
+        return orders;
     }
 };
 
@@ -103,6 +98,10 @@ void matchOrders(int tickerID) {
     // Copy the orders into vectors to avoid modification while iterating.
     auto buyOrders = tickers[tickerID].buyOrders.toVector();
     auto sellOrders = tickers[tickerID].sellOrders.toVector();
+
+    // Sort buy orders in descending order of price and sell orders in ascending order
+    sort(buyOrders.begin(), buyOrders.end(), [](Order* a, Order* b) { return a->price > b->price; });
+    sort(sellOrders.begin(), sellOrders.end(), [](Order* a, Order* b) { return a->price < b->price; });
 
     for (auto buyOrder : buyOrders) {
         for (auto sellOrder : sellOrders) {
