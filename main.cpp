@@ -5,8 +5,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <mutex>
-#include <memory>
-#include <queue>
+#include <algorithm>
 
 using namespace std;
 
@@ -31,6 +30,7 @@ struct OrderList {
 
     OrderList() : head(nullptr) {}
 
+    // Add an order to the list
     void addOrder(OrderType type, int quantity, float price) {
         Order* newOrder = new Order(type, quantity, price);
         Order* expectedHead = head.load(memory_order_acquire);
@@ -40,6 +40,18 @@ struct OrderList {
         } while (!head.compare_exchange_weak(expectedHead, newOrder, memory_order_release, memory_order_relaxed));
     }
 
+    // Convert list to a vector for easy access
+    vector<Order*> toVector() {
+        vector<Order*> orders;
+        Order* current = head.load(memory_order_acquire);
+        while (current) {
+            orders.push_back(current);
+            current = current->next.load(memory_order_acquire);
+        }
+        return orders;
+    }
+
+    // Remove a specific order from the list
     void removeOrder(Order* target) {
         Order* prev = nullptr;
         Order* current = head.load(memory_order_acquire);
@@ -59,17 +71,6 @@ struct OrderList {
             current = current->next.load(memory_order_acquire);
         }
     }
-
-    // Convert linked list to vector (for easier processing in matching)
-    vector<Order*> toVector() {
-        vector<Order*> orders;
-        Order* current = head.load(memory_order_acquire);
-        while (current) {
-            orders.push_back(current);
-            current = current->next.load(memory_order_acquire);
-        }
-        return orders;
-    }
 };
 
 // Order book for each ticker
@@ -78,10 +79,10 @@ struct TickerOrderBook {
     OrderList sellOrders;
 };
 
-// Global ticker array (no maps)
+// Global ticker array
 TickerOrderBook tickers[MAX_TICKERS];
 
-// Add order function
+// Add an order to the appropriate order book (buy or sell)
 void addOrder(OrderType type, int tickerID, int quantity, float price) {
     if (tickerID < 0 || tickerID >= MAX_TICKERS) return;
     if (type == BUY) {
@@ -95,16 +96,11 @@ void addOrder(OrderType type, int tickerID, int quantity, float price) {
 void matchOrders(int tickerID) {
     if (tickerID < 0 || tickerID >= MAX_TICKERS) return;
 
-    // Copy the orders into vectors to avoid modification while iterating.
     auto buyOrders = tickers[tickerID].buyOrders.toVector();
     auto sellOrders = tickers[tickerID].sellOrders.toVector();
 
-    // Sort buy orders in descending order of price and sell orders in ascending order
-    sort(buyOrders.begin(), buyOrders.end(), [](Order* a, Order* b) { return a->price > b->price; });
-    sort(sellOrders.begin(), sellOrders.end(), [](Order* a, Order* b) { return a->price < b->price; });
-
-    for (auto buyOrder : buyOrders) {
-        for (auto sellOrder : sellOrders) {
+    for (auto& buyOrder : buyOrders) {
+        for (auto& sellOrder : sellOrders) {
             if (buyOrder->price >= sellOrder->price) {
                 int tradedQuantity = min(buyOrder->quantity, sellOrder->quantity);
                 cout << "Matched Ticker " << tickerID
@@ -146,10 +142,12 @@ int main() {
 
     int ordersPerThread = MAX_ORDERS / numThreads;
 
+    // Launch simulation threads
     for (int i = 0; i < numThreads; i++) {
         threads.emplace_back(simulateOrders, i, ordersPerThread);
     }
 
+    // Wait for threads to finish
     for (auto& t : threads) {
         t.join();
     }
