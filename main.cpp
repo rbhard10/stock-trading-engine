@@ -62,9 +62,14 @@ struct OrderList {
                 if (prev) {
                     prev->next.store(nextOrder, memory_order_release);
                 } else {
-                    head.compare_exchange_strong(current, nextOrder, memory_order_release, memory_order_relaxed);
+                    bool success = head.compare_exchange_strong(current, nextOrder, memory_order_release, memory_order_relaxed);
+                    if (!success) {
+                        // Try again if head was updated by another thread during compare_exchange_strong
+                        current = head.load(memory_order_acquire);
+                        continue;
+                    }
                 }
-                delete current;
+                delete current; // Safe delete
                 return;
             }
             prev = current;
